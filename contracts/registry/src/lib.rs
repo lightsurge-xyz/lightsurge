@@ -230,7 +230,9 @@ fn reward_per_token(env: &Env) -> i128 {
     // Compute (rate * PRECISION / total) first to avoid i128 overflow
     // on the three-way multiplication elapsed * rate * PRECISION.
     let rate_per_token = rate.checked_mul(PRECISION).unwrap() / total;
-    stored.checked_add(elapsed.checked_mul(rate_per_token).unwrap()).unwrap()
+    stored
+        .checked_add(elapsed.checked_mul(rate_per_token).unwrap())
+        .unwrap()
 }
 
 fn earned(info: &ServiceInfo, rpt: i128) -> i128 {
@@ -250,7 +252,7 @@ fn update_rewards(env: &Env, service: Option<&Address>) -> Option<ServiceInfo> {
         .set(&DataKey::RewardPerTokenStored, &rpt);
 
     let end = get_reward_end(env);
-    if end > 0 {
+    if end > 0 && get_total_bonds(env) > 0 {
         let now = env.ledger().timestamp();
         let last = if now < end { now } else { end };
         env.storage()
@@ -479,7 +481,11 @@ impl Registry {
         if info.pending_unstake > 0 {
             return Err(ContractError::PendingUnstakeExists);
         }
-        if info.bond.checked_sub(amount).unwrap() < get_min_bond(&env) {
+        let remaining = info
+            .bond
+            .checked_sub(amount)
+            .ok_or(ContractError::InvalidAmount)?;
+        if remaining < get_min_bond(&env) {
             return Err(ContractError::BondBelowMinimum);
         }
 
@@ -600,9 +606,10 @@ impl Registry {
 
         // Update total bonds
         let total = get_total_bonds(&env);
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalBonds, &total.checked_sub(slash_amount).unwrap());
+        env.storage().instance().set(
+            &DataKey::TotalBonds,
+            &total.checked_sub(slash_amount).unwrap(),
+        );
 
         // Distribute slashed funds
         let to_reporter = slash_amount * SLASH_REPORTER_BPS / BPS;
@@ -759,6 +766,10 @@ impl Registry {
             let leftover = remaining.checked_mul(get_reward_rate(&env)).unwrap();
             (amount + leftover) / duration as i128
         };
+
+        if rate == 0 {
+            return Err(ContractError::ZeroRewardRate);
+        }
 
         // Transfer reward tokens into contract
         let tok = token::Client::new(&env, &get_token(&env));

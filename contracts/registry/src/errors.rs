@@ -15,4 +15,5 @@ pub enum ContractError {
     PendingUnstakeExists = 9,
     BondBelowMinimum = 10,
     NothingToSlash = 11,
+    ZeroRewardRate = 12,
 }
