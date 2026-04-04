@@ -204,7 +204,8 @@ fn effective_reputation(info: &ServiceInfo, now: u64) -> u32 {
         return info.reputation.min(DEFAULT_REPUTATION);
     }
     let elapsed_days = now.saturating_sub(info.last_slash_time) / SECONDS_PER_DAY;
-    let recovery = (elapsed_days as u32).saturating_mul(REPUTATION_RECOVERY_RATE);
+    let elapsed_days_u32 = u32::try_from(elapsed_days).unwrap_or(u32::MAX);
+    let recovery = elapsed_days_u32.saturating_mul(REPUTATION_RECOVERY_RATE);
     (info.reputation + recovery).min(DEFAULT_REPUTATION)
 }
 
@@ -713,10 +714,7 @@ impl Registry {
             .instance()
             .set(&DataKey::DisputeResolver, &resolver);
         bump_instance(&env);
-        SetDisputeResolverEvent {
-            resolver: resolver.clone(),
-        }
-        .publish(&env);
+        SetDisputeResolverEvent { resolver }.publish(&env);
     }
 
     /// Set the treasury address for slash distributions.
@@ -724,10 +722,7 @@ impl Registry {
         get_admin(&env).require_auth();
         env.storage().instance().set(&DataKey::Treasury, &treasury);
         bump_instance(&env);
-        SetTreasuryEvent {
-            treasury: treasury.clone(),
-        }
-        .publish(&env);
+        SetTreasuryEvent { treasury }.publish(&env);
     }
 
     /// Update the minimum bond required for registration.
