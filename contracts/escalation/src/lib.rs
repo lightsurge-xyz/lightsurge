@@ -10,8 +10,8 @@ use errors::ContractError;
 use types::{DataKey, DisputeInfo, DisputeStatus, Verdict};
 
 use soroban_sdk::{
-    contract, contractevent, contractimpl, token, vec, Address, Bytes, BytesN, Env, IntoVal,
-    Symbol, Val, Vec,
+    contract, contractevent, contractimpl, token, vec, xdr::ToXdr, Address, Bytes, BytesN, Env,
+    IntoVal, Symbol, Val, Vec,
 };
 
 // TTL constants (~30 days at 5s ledgers)
@@ -64,6 +64,13 @@ pub struct SetEvaluatorEvent {
     pub pub_key: BytesN<32>,
 }
 
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetDisputeBondEvent {
+    pub admin: Address,
+    pub bond: i128,
+}
+
 // ---------------------------------------------------------------------------
 // Storage helpers
 // ---------------------------------------------------------------------------
@@ -88,10 +95,7 @@ fn get_evaluator_pub_key(env: &Env) -> BytesN<32> {
 }
 
 fn get_dispute_bond(env: &Env) -> i128 {
-    env.storage()
-        .instance()
-        .get(&DataKey::DisputeBond)
-        .unwrap()
+    env.storage().instance().get(&DataKey::DisputeBond).unwrap()
 }
 
 fn get_defense_window(env: &Env) -> u64 {
@@ -186,17 +190,24 @@ fn resolve_client_wins(env: &Env, dispute: &DisputeInfo) -> i128 {
     let slash_amount = service_bond * slash_bps / BPS;
 
     if slash_amount > 0 {
-        call_registry_slash(env, &registry, &dispute.service, slash_amount, &dispute.client);
+        call_registry_slash(
+            env,
+            &registry,
+            &dispute.service,
+            slash_amount,
+            &dispute.client,
+        );
         // Track offense only when a real slash occurred
         set_offense_count(env, &dispute.service, offense_count + 1);
-        // Return dispute bond to client only when slash occurred
-        let tok = token::Client::new(env, &get_token(env));
-        tok.transfer(
-            &env.current_contract_address(),
-            &dispute.client,
-            &dispute.dispute_bond,
-        );
     }
+
+    // Always return dispute bond to client regardless of slash amount
+    let tok = token::Client::new(env, &get_token(env));
+    tok.transfer(
+        &env.current_contract_address(),
+        &dispute.client,
+        &dispute.dispute_bond,
+    );
 
     slash_amount
 }
@@ -245,9 +256,7 @@ impl Escalation {
         env.storage()
             .instance()
             .set(&DataKey::DefenseWindow, &defense_window);
-        env.storage()
-            .instance()
-            .set(&DataKey::NextDisputeId, &1u64);
+        env.storage().instance().set(&DataKey::NextDisputeId, &1u64);
     }
 
     // -----------------------------------------------------------------------
@@ -313,8 +322,7 @@ impl Escalation {
         verdict: Verdict,
         signature: BytesN<64>,
     ) -> Result<(), ContractError> {
-        let mut dispute =
-            load_dispute(&env, dispute_id).ok_or(ContractError::DisputeNotFound)?;
+        let mut dispute = load_dispute(&env, dispute_id).ok_or(ContractError::DisputeNotFound)?;
 
         if dispute.status != DisputeStatus::Open {
             return Err(ContractError::DisputeAlreadyResolved);
@@ -341,11 +349,11 @@ impl Escalation {
         msg_bytes[21] = verdict_byte;
         msg_bytes[22..30].copy_from_slice(&dispute.filed_at.to_be_bytes());
         msg_bytes[30..62].copy_from_slice(&receipt_hash_arr);
-        let message = Bytes::from_slice(&env, &msg_bytes);
+        let mut message = Bytes::from_slice(&env, &msg_bytes);
+        message.append(&env.current_contract_address().to_xdr(&env));
 
         // Panics on invalid signature
-        env.crypto()
-            .ed25519_verify(&pub_key, &message, &signature);
+        env.crypto().ed25519_verify(&pub_key, &message, &signature);
 
         // Execute resolution
         let slash_amount = match verdict {
@@ -372,8 +380,7 @@ impl Escalation {
     /// Auto-resolve after defense window expires with no verdict.
     /// Server loses by default. Anyone can call this.
     pub fn resolve(env: Env, dispute_id: u64) -> Result<(), ContractError> {
-        let mut dispute =
-            load_dispute(&env, dispute_id).ok_or(ContractError::DisputeNotFound)?;
+        let mut dispute = load_dispute(&env, dispute_id).ok_or(ContractError::DisputeNotFound)?;
 
         if dispute.status != DisputeStatus::Open {
             return Err(ContractError::DisputeAlreadyResolved);
@@ -381,7 +388,7 @@ impl Escalation {
 
         let now = env.ledger().timestamp();
 
-        if now < dispute.filed_at.checked_add(dispute.defense_window).unwrap() {
+        if now < dispute.filed_at.saturating_add(dispute.defense_window) {
             return Err(ContractError::DefenseWindowActive);
         }
 
@@ -416,9 +423,11 @@ impl Escalation {
 
     /// Update minimum dispute bond.
     pub fn set_dispute_bond(env: Env, bond: i128) {
-        get_admin(&env).require_auth();
+        let admin = get_admin(&env);
+        admin.require_auth();
         assert!(bond > 0, "dispute_bond must be positive");
         env.storage().instance().set(&DataKey::DisputeBond, &bond);
+        SetDisputeBondEvent { admin, bond }.publish(&env);
         bump_instance(&env);
     }
 
