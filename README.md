@@ -60,6 +60,12 @@ Through an **MCP server** or **REST API**:
 
 ---
 
+## Development
+
+For contract development setup, build workflow, testing, and deployment instructions, see [DEVELOPMENT.md](./DEVELOPMENT.md).
+
+---
+
 ## Status
 
 Under active development. Contracts are not audited. Do not use on mainnet.
