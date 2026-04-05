@@ -800,4 +800,13 @@ impl Registry {
     pub fn min_bond(env: Env) -> i128 {
         get_min_bond(&env)
     }
+
+    /// Returns the bond amount for a service, or 0 if not registered.
+    /// Used by Escalation contract for progressive slash computation.
+    pub fn bond_of(env: Env, service: Address) -> i128 {
+        bump_instance(&env);
+        get_service(&env, &service)
+            .map(|info| info.bond)
+            .unwrap_or(0)
+    }
 }
