@@ -24,6 +24,7 @@ pub struct DisputeInfo {
     pub encrypted_response: Bytes,
     pub dispute_bond: i128,
     pub filed_at: u64,
+    pub defense_window: u64,
     pub status: DisputeStatus,
 }
 

@@ -24,6 +24,12 @@ const PROGRESSIVE_SLASH_BPS: u32 = 500; // +5% per additional offense
 const MAX_SLASH_BPS: u32 = 10000; // 100% max
 const BPS: i128 = 10000;
 
+// Maximum defense window, clamped to persistent storage lifetime (~30 days)
+const MAX_DEFENSE_WINDOW_SECS: u64 = TTL_EXTEND as u64 * 5;
+
+// Domain separator for Ed25519 verdict signatures
+const VERDICT_DOMAIN: &[u8] = b"LS_VERDICT_V1";
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -181,18 +187,16 @@ fn resolve_client_wins(env: &Env, dispute: &DisputeInfo) -> i128 {
 
     if slash_amount > 0 {
         call_registry_slash(env, &registry, &dispute.service, slash_amount, &dispute.client);
+        // Track offense only when a real slash occurred
+        set_offense_count(env, &dispute.service, offense_count + 1);
+        // Return dispute bond to client only when slash occurred
+        let tok = token::Client::new(env, &get_token(env));
+        tok.transfer(
+            &env.current_contract_address(),
+            &dispute.client,
+            &dispute.dispute_bond,
+        );
     }
-
-    // Track offense
-    set_offense_count(env, &dispute.service, offense_count + 1);
-
-    // Return dispute bond to client
-    let tok = token::Client::new(env, &get_token(env));
-    tok.transfer(
-        &env.current_contract_address(),
-        &dispute.client,
-        &dispute.dispute_bond,
-    );
 
     slash_amount
 }
@@ -267,6 +271,10 @@ impl Escalation {
         let tok = token::Client::new(&env, &get_token(&env));
         tok.transfer(&client, &env.current_contract_address(), &bond);
 
+        // Clamp defense window so no dispute can outlive its storage TTL
+        let raw_dw = get_defense_window(&env);
+        let clamped_dw = raw_dw.min(MAX_DEFENSE_WINDOW_SECS);
+
         let id = get_next_id(&env);
 
         let info = DisputeInfo {
@@ -277,6 +285,7 @@ impl Escalation {
             encrypted_response,
             dispute_bond: bond,
             filed_at: env.ledger().timestamp(),
+            defense_window: clamped_dw,
             status: DisputeStatus::Open,
         };
 
@@ -311,16 +320,27 @@ impl Escalation {
             return Err(ContractError::DisputeAlreadyResolved);
         }
 
-        // Verify Ed25519 signature from TEE evaluator
+        // Reject verdicts submitted after the defense period has closed
+        let now = env.ledger().timestamp();
+        if now > dispute.filed_at.saturating_add(dispute.defense_window) {
+            return Err(ContractError::DefenseWindowExpired);
+        }
+
+        // Verify Ed25519 signature from TEE evaluator.
+        // Message layout (62 bytes):
+        //   VERDICT_DOMAIN (13) | dispute_id BE (8) | verdict (1) | filed_at BE (8) | receipt_hash (32)
         let pub_key = get_evaluator_pub_key(&env);
         let verdict_byte: u8 = match verdict {
             Verdict::ClientWins => 0,
             Verdict::ServiceWins => 1,
         };
-
-        let mut msg_bytes = [0u8; 9];
-        msg_bytes[..8].copy_from_slice(&dispute_id.to_be_bytes());
-        msg_bytes[8] = verdict_byte;
+        let receipt_hash_arr: [u8; 32] = dispute.receipt_hash.to_array();
+        let mut msg_bytes = [0u8; 62];
+        msg_bytes[..13].copy_from_slice(VERDICT_DOMAIN);
+        msg_bytes[13..21].copy_from_slice(&dispute_id.to_be_bytes());
+        msg_bytes[21] = verdict_byte;
+        msg_bytes[22..30].copy_from_slice(&dispute.filed_at.to_be_bytes());
+        msg_bytes[30..62].copy_from_slice(&receipt_hash_arr);
         let message = Bytes::from_slice(&env, &msg_bytes);
 
         // Panics on invalid signature
@@ -359,10 +379,9 @@ impl Escalation {
             return Err(ContractError::DisputeAlreadyResolved);
         }
 
-        let defense_window = get_defense_window(&env);
         let now = env.ledger().timestamp();
 
-        if now < dispute.filed_at.checked_add(defense_window).unwrap() {
+        if now < dispute.filed_at.checked_add(dispute.defense_window).unwrap() {
             return Err(ContractError::DefenseWindowActive);
         }
 

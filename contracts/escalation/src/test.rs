@@ -23,14 +23,27 @@ fn make_keypair(env: &Env) -> (BytesN<32>, SigningKey) {
     (BytesN::from_array(env, &pub_key), signing_key)
 }
 
-fn sign_verdict(env: &Env, key: &SigningKey, dispute_id: u64, verdict: &Verdict) -> BytesN<64> {
+// Message layout must match lib.rs submit_verdict:
+//   VERDICT_DOMAIN (13) | dispute_id BE (8) | verdict (1) | filed_at BE (8) | receipt_hash (32)
+fn sign_verdict(
+    env: &Env,
+    key: &SigningKey,
+    dispute_id: u64,
+    verdict: &Verdict,
+    filed_at: u64,
+    receipt_hash: &[u8; 32],
+) -> BytesN<64> {
     let verdict_byte: u8 = match verdict {
         Verdict::ClientWins => 0,
         Verdict::ServiceWins => 1,
     };
-    let mut msg = [0u8; 9];
-    msg[..8].copy_from_slice(&dispute_id.to_be_bytes());
-    msg[8] = verdict_byte;
+    const DOMAIN: &[u8] = b"LS_VERDICT_V1";
+    let mut msg = [0u8; 62];
+    msg[..13].copy_from_slice(DOMAIN);
+    msg[13..21].copy_from_slice(&dispute_id.to_be_bytes());
+    msg[21] = verdict_byte;
+    msg[22..30].copy_from_slice(&filed_at.to_be_bytes());
+    msg[30..62].copy_from_slice(receipt_hash);
     let sig = key.sign(&msg);
     BytesN::from_array(env, &sig.to_bytes())
 }
@@ -208,7 +221,7 @@ fn test_verdict_client_wins() {
         .dispute(&client, &svc, &t.receipt_hash(), &t.encrypted_response());
 
     let verdict = Verdict::ClientWins;
-    let sig = sign_verdict(&t.env, &t.signing_key, id, &verdict);
+    let sig = sign_verdict(&t.env, &t.signing_key, id, &verdict, 1_000_000, &[0xABu8; 32]);
 
     let client_before = t.token.balance(&client);
     t.escalation.submit_verdict(&id, &verdict, &sig);
@@ -246,7 +259,7 @@ fn test_verdict_service_wins() {
         .dispute(&client, &svc, &t.receipt_hash(), &t.encrypted_response());
 
     let verdict = Verdict::ServiceWins;
-    let sig = sign_verdict(&t.env, &t.signing_key, id, &verdict);
+    let sig = sign_verdict(&t.env, &t.signing_key, id, &verdict, 1_000_000, &[0xABu8; 32]);
 
     let svc_before = t.token.balance(&svc);
     t.escalation.submit_verdict(&id, &verdict, &sig);
@@ -325,7 +338,7 @@ fn test_progressive_slashing() {
         .escalation
         .dispute(&client, &svc, &t.receipt_hash(), &t.encrypted_response());
     let verdict = Verdict::ClientWins;
-    let sig1 = sign_verdict(&t.env, &t.signing_key, id1, &verdict);
+    let sig1 = sign_verdict(&t.env, &t.signing_key, id1, &verdict, 1_000_000, &[0xABu8; 32]);
     t.escalation.submit_verdict(&id1, &verdict, &sig1);
 
     let info = t.registry.get(&svc);
@@ -336,7 +349,7 @@ fn test_progressive_slashing() {
     let id2 = t
         .escalation
         .dispute(&client, &svc, &t.receipt_hash(), &t.encrypted_response());
-    let sig2 = sign_verdict(&t.env, &t.signing_key, id2, &verdict);
+    let sig2 = sign_verdict(&t.env, &t.signing_key, id2, &verdict, 1_000_000, &[0xABu8; 32]);
     t.escalation.submit_verdict(&id2, &verdict, &sig2);
 
     let info = t.registry.get(&svc);
@@ -347,7 +360,7 @@ fn test_progressive_slashing() {
     let id3 = t
         .escalation
         .dispute(&client, &svc, &t.receipt_hash(), &t.encrypted_response());
-    let sig3 = sign_verdict(&t.env, &t.signing_key, id3, &verdict);
+    let sig3 = sign_verdict(&t.env, &t.signing_key, id3, &verdict, 1_000_000, &[0xABu8; 32]);
     t.escalation.submit_verdict(&id3, &verdict, &sig3);
 
     let info = t.registry.get(&svc);
@@ -373,7 +386,7 @@ fn test_invalid_signature_fails() {
     // Sign with a wrong key
     let wrong_key = SigningKey::from_bytes(&[99u8; 32]);
     let verdict = Verdict::ClientWins;
-    let bad_sig = sign_verdict(&t.env, &wrong_key, id, &verdict);
+    let bad_sig = sign_verdict(&t.env, &wrong_key, id, &verdict, 1_000_000, &[0xABu8; 32]);
 
     t.escalation.submit_verdict(&id, &verdict, &bad_sig);
 }
@@ -390,7 +403,7 @@ fn test_wrong_verdict_in_signature_fails() {
         .dispute(&client, &svc, &t.receipt_hash(), &t.encrypted_response());
 
     // Sign for ServiceWins but submit as ClientWins
-    let sig = sign_verdict(&t.env, &t.signing_key, id, &Verdict::ServiceWins);
+    let sig = sign_verdict(&t.env, &t.signing_key, id, &Verdict::ServiceWins, 1_000_000, &[0xABu8; 32]);
     t.escalation
         .submit_verdict(&id, &Verdict::ClientWins, &sig);
 }
@@ -411,7 +424,7 @@ fn test_double_resolve_fails() {
         .dispute(&client, &svc, &t.receipt_hash(), &t.encrypted_response());
 
     let verdict = Verdict::ClientWins;
-    let sig = sign_verdict(&t.env, &t.signing_key, id, &verdict);
+    let sig = sign_verdict(&t.env, &t.signing_key, id, &verdict, 1_000_000, &[0xABu8; 32]);
     t.escalation.submit_verdict(&id, &verdict, &sig);
 
     // Second resolve fails
@@ -431,7 +444,7 @@ fn test_double_verdict_fails() {
         .dispute(&client, &svc, &t.receipt_hash(), &t.encrypted_response());
 
     let verdict = Verdict::ClientWins;
-    let sig = sign_verdict(&t.env, &t.signing_key, id, &verdict);
+    let sig = sign_verdict(&t.env, &t.signing_key, id, &verdict, 1_000_000, &[0xABu8; 32]);
     t.escalation.submit_verdict(&id, &verdict, &sig);
     t.escalation.submit_verdict(&id, &verdict, &sig); // fails
 }
@@ -456,7 +469,7 @@ fn test_verdict_can_happen_before_window() {
     // Verdict at 1 second — well within window
     t.advance(1);
     let verdict = Verdict::ClientWins;
-    let sig = sign_verdict(&t.env, &t.signing_key, id, &verdict);
+    let sig = sign_verdict(&t.env, &t.signing_key, id, &verdict, 1_000_000, &[0xABu8; 32]);
     t.escalation.submit_verdict(&id, &verdict, &sig);
 
     let dispute = t.escalation.get_dispute(&id);
@@ -482,7 +495,7 @@ fn test_slash_during_rewards() {
         .escalation
         .dispute(&client, &svc, &t.receipt_hash(), &t.encrypted_response());
     let verdict = Verdict::ClientWins;
-    let sig = sign_verdict(&t.env, &t.signing_key, id, &verdict);
+    let sig = sign_verdict(&t.env, &t.signing_key, id, &verdict, 1_000_500, &[0xABu8; 32]);
     t.escalation.submit_verdict(&id, &verdict, &sig);
 
     // Service bond slashed by 10%: 100 → 90
@@ -509,7 +522,7 @@ fn test_slash_decreases_reputation() {
         .escalation
         .dispute(&client, &svc, &t.receipt_hash(), &t.encrypted_response());
     let verdict = Verdict::ClientWins;
-    let sig = sign_verdict(&t.env, &t.signing_key, id, &verdict);
+    let sig = sign_verdict(&t.env, &t.signing_key, id, &verdict, 1_000_000, &[0xABu8; 32]);
     t.escalation.submit_verdict(&id, &verdict, &sig);
 
     // Reputation decreased by 1000 bps (10%)

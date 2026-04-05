@@ -9,4 +9,5 @@ pub enum ContractError {
     DefenseWindowActive = 3,
     Unauthorized = 4,
     InvalidAmount = 5,
+    DefenseWindowExpired = 6,
 }
